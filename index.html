@@ -1227,38 +1227,47 @@ window.SF_API = async function (name, payload) {
  } finally {clearTimeout(timeout);}
 };
 </script>
-<script>
-/* Utilidades e catálogo do painel; a loja lê o mesmo banco em index.html. */
+<script>/* O painel recebe os nomes e preços primeiro; fotos somente quando entram na tela. */
 (() => {
  'use strict';
- const CFG=window.SF_CONFIG||{};
- const $=(sel,root=document)=>root.querySelector(sel);
- const $$=(sel,root=document)=>Array.from(root.querySelectorAll(sel));
+ const CFG=window.SF_CONFIG||{},$=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>Array.from(r.querySelectorAll(s));
  const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
- const BRL=new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'});
- const plainName=s=>String(s).replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu,'').replace(/\s+/g,' ').trim();
- const memory=new Map();
- const makeStore=kind=>({
-  get(k){try{return window[kind].getItem(k);}catch(_){return memory.get(kind+k)||null;}},
-  set(k,v){try{window[kind].setItem(k,v);}catch(_){memory.set(kind+k,v);}},
-  remove(k){try{window[kind].removeItem(k);}catch(_){memory.delete(kind+k);}}
- });
- let products=[];
- const setRows=rows=>{
-  products=rows.map((r,i)=>({id:String(r.id??'p'+i),loja:r.loja||'sdf',name:String(r.name??'').trim(),price:r.price==null||r.price===''?null:Number(r.price),description:String(r.description??''),observation:String(r.observation??''),image:r.main_image||r.thumb||'',gallery:Array.isArray(r.gallery_images)?r.gallery_images:[],category:String(r.category??''),available:r.available!==false,active:r.active!==false,order:Number(r.sort_order)||i})).filter(p=>p.active&&p.name&&p.image).sort((a,b)=>a.order-b.order);
- };
- async function loadProducts(role){
-  const token=sessionStorage.getItem('sf_tk');if(!token)return;
-  const db=window.SF_DB;
-  let rows;
-  if(role==='admin'||role==='vendas') rows=await window.SF_API('sf_catalogo_admin',{t:token});
-  else { rows=[];for(const brand of ['sdf','sf']){let offset=0,page;do{page=await window.SF_API('sf_loja_catalogo',{p_loja:brand,p_off:offset,p_lim:300});if(!Array.isArray(page))throw new Error('Catálogo inválido.');rows.push(...page);offset+=page.length;}while(page.length===300&&offset<3000);}}
-
-  if(!Array.isArray(rows))throw new Error('Catálogo inválido.');setRows(rows);
+ const BRL=new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}),plainName=s=>String(s).replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu,'').replace(/\s+/g,' ').trim();
+ const memory=new Map(),makeStore=kind=>({get(k){try{return window[kind].getItem(k);}catch(_){return memory.get(kind+k)||null;}},set(k,v){try{window[kind].setItem(k,v);}catch(_){memory.set(kind+k,v);}},remove(k){try{window[kind].removeItem(k);}catch(_){memory.delete(kind+k);}}});
+ let products=[],loadedAt=0,pending=null,imageTimer=0,imagePending=false;
+ const images=new Map(),wanted=new Set(),failed=new Set(),flying=new Set(),observed=new Set();
+ const fold=s=>plainName(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+ const setRows=rows=>{products=rows.map((r,i)=>({id:String(r.id??'p'+i),loja:r.loja||'sdf',name:String(r.name||'').trim(),price:r.price==null||r.price===''?null:Number(r.price),image:images.get(String(r.id))||r.main_image||'',category:String(r.category||''),available:r.available!==false,active:r.active!==false,order:Number(r.sort_order)||i})).filter(p=>p.active&&p.name).sort((a,b)=>a.order-b.order);};
+ function applyImage(el,id){
+  const uri=images.get(id);if(!uri)return false;
+  if(el.tagName==='IMG'){if(el.getAttribute('src')!==uri)el.src=uri;}
+  else {const old=el.querySelector('.sf-pic');if(old?.tagName==='IMG'){if(old.src!==uri)old.src=uri;}else{const img=document.createElement('img');img.className='sf-pic';img.alt=el.dataset.productName||'';img.src=uri;img.decoding='async';if(old)old.replaceWith(img);else el.prepend(img);}}
+  return true;
  }
- window.SF={CFG,$,$$,esc,BRL,plainName,store:makeStore('localStorage'),sstore:makeStore('sessionStorage'),setRows,loadProducts,listProducts:()=>products,getProducts:()=>products.slice(),getProduct:id=>products.find(p=>p.id===id),refresh:()=>{}};
+ function requestImage(id){if(!id||images.has(id)||failed.has(id)||flying.has(id))return;wanted.add(id);clearTimeout(imageTimer);imageTimer=setTimeout(fetchImages,25);}
+ async function fetchImages(){
+  if(imagePending||!wanted.size)return;
+  const token=sessionStorage.getItem('sf_tk');if(!token)return;
+  const ids=Array.from(wanted).slice(0,24);ids.forEach(id=>{wanted.delete(id);flying.add(id);});imagePending=true;
+  try{const rows=await window.SF_API('sf_catalogo_imagens',{t:token,p_ids:ids});if(Array.isArray(rows))rows.forEach(row=>{if(row.main_image)images.set(String(row.id),row.main_image);});ids.forEach(id=>{if(!images.has(id))failed.add(id);});products.forEach(p=>{if(images.has(p.id))p.image=images.get(p.id);});
+   document.querySelectorAll('[data-catalog-id]').forEach(el=>applyImage(el,el.dataset.catalogId));
+  }catch(_){ids.forEach(id=>failed.add(id));}finally{ids.forEach(id=>flying.delete(id));imagePending=false;if(wanted.size)imageTimer=setTimeout(fetchImages,25);}
+ }
+ const observer=typeof IntersectionObserver==='function'?new IntersectionObserver(entries=>entries.forEach(entry=>{if(entry.isIntersecting){const el=entry.target;requestImage(el.dataset.catalogId);observer.unobserve(el);observed.delete(el);}}),{rootMargin:'120px'}):null;
+ function hydrateImages(scope=document){
+  if(observer)observed.forEach(el=>{if(!el.isConnected){observer.unobserve(el);observed.delete(el);}});
+  scope.querySelectorAll('[data-order-image]').forEach(el=>{const p=products.find(p=>(!el.dataset.productStore||p.loja===el.dataset.productStore)&&fold(p.name)===fold(el.dataset.productName));if(p)el.dataset.catalogId=p.id;});
+  scope.querySelectorAll('[data-catalog-id]').forEach(el=>{if(applyImage(el,el.dataset.catalogId))return;if(observer){if(!observed.has(el)){observed.add(el);observer.observe(el);}}else requestImage(el.dataset.catalogId);});
+ }
+ async function loadProducts(role,force=false){
+  const token=sessionStorage.getItem('sf_tk');if(!token)return;
+  if(pending){if(!force)return pending;try{await pending;}catch(_){}}
+  if(!force&&Date.now()-loadedAt<60000){hydrateImages();return products;}
+  pending=window.SF_API('sf_catalogo_resumo',{t:token}).then(rows=>{if(!Array.isArray(rows))throw new Error('Catálogo inválido');setRows(rows);loadedAt=Date.now();hydrateImages();document.dispatchEvent(new CustomEvent('sf:catalog-ready'));return products;}).finally(()=>pending=null);
+  return pending;
+ }
+ window.SF={CFG,$,$$,esc,BRL,plainName,store:makeStore('localStorage'),sstore:makeStore('sessionStorage'),setRows,loadProducts,hydrateImages,retryImages(){failed.clear();hydrateImages();},invalidateImage(id){images.delete(id);failed.delete(id);loadedAt=0;},listProducts:()=>products,getProducts:()=>products.slice(),getProduct:id=>products.find(p=>p.id===id),refresh:()=>hydrateImages()};
 })();
-
 </script>
 <script>
 
@@ -1374,7 +1383,7 @@ window.SF_API = async function (name, payload) {
     },
     async save(id, payload) {
       if (payload.main_image) { try { payload.thumb = await thumbOf(payload.main_image); } catch (_) { /* segue sem miniatura */ } }
-      await rpcShop('sf_prod_salvar', { t: tk(), p_id: id, p: payload });
+      const saved=await rpcShop('sf_prod_salvar', { t: tk(), p_id: id, p: payload });if(SF.invalidateImage)SF.invalidateImage(id||saved);
       try { localStorage.removeItem('sf:catalog:v4:'+catalogStore); } catch (_) { /* ignora */ }
     },
     async remove(id) { await rpcShop('sf_prod_del', { t: tk(), p_id: id }); },
@@ -1394,7 +1403,7 @@ window.SF_API = async function (name, payload) {
     }).join('')+'</div>';
   }
   function rpcShop(name, args = {}, store = catalogStore) {
-    const names={sf_catalogo_admin:'sf_loja_catalogo_admin',sf_categorias:'sf_loja_categorias',sf_produto:'sf_loja_produto_admin',sf_prod_salvar:'sf_loja_prod_salvar',sf_prod_del:'sf_loja_prod_del',sf_prod_ordem:'sf_loja_prod_ordem',sf_cat_criar:'sf_loja_cat_criar',sf_cat_del:'sf_loja_cat_del'};
+    const names={sf_catalogo_admin:'sf_catalogo_resumo',sf_categorias:'sf_loja_categorias',sf_produto:'sf_loja_produto_admin',sf_prod_salvar:'sf_loja_prod_salvar',sf_prod_del:'sf_loja_prod_del',sf_prod_ordem:'sf_loja_prod_ordem',sf_cat_criar:'sf_loja_cat_criar',sf_cat_del:'sf_loja_cat_del'};
     return rpcx(names[name],{...args,...(name==='sf_produto'?{t:tk()}:{}),p_loja:store});
   }
 
@@ -1511,7 +1520,7 @@ window.SF_API = async function (name, payload) {
       const meta = [money(r.price), r.category, r.active ? '' : 'Oculto no site', r.available === false ? 'Indisponível' : ''].filter(Boolean).join(' · ');
       const asking = confirmId === r.id;
       return `<article class="ed-row${r.active ? '' : ' is-off'}" data-id="${esc(r.id)}">
-        <img class="ed-row__thumb" src="${esc(r.main_image)}" alt="" width="56" height="70" loading="lazy">
+        <img class="ed-row__thumb" data-catalog-id="${esc(r.id)}" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='70'%3E%3Crect width='56' height='70' fill='%23f0eee6'/%3E%3C/svg%3E" alt="" width="56" height="70" loading="lazy">
         <div class="ed-row__info"><div class="ed-row__name">${esc(r.name)}</div><div class="ed-row__meta">${esc(meta)}</div></div>
         <div class="ed-row__tools">
           ${asking ? `<span class="ed-row__ask">Excluir este produto?</span>
@@ -1525,11 +1534,12 @@ window.SF_API = async function (name, payload) {
         </div>
       </article>`;
     }).join('') : '<p class="ed__count">Nenhum produto ainda. Toque em “Novo produto”.</p>');
+    if(SF.hydrateImages)SF.hydrateImages(editDlg);
   }
 
   async function refreshAll() {
     rows = await backend.list();
-    try { const me=JSON.parse(sessionStorage.getItem('sf_me')||'null');await SF.loadProducts(me?.r||'vendas'); }catch(_){}
+    try { const me=JSON.parse(sessionStorage.getItem('sf_me')||'null');await SF.loadProducts(me?.r||'vendas',true); }catch(_){}
     renderList();
   }
 
@@ -1814,7 +1824,7 @@ window.SF_API = async function (name, payload) {
     if (ent()) return o.an ? '<div class="sf-p"><b>' + E(o.rn) + '</b> · ' + E(o.rt) + '</div>' : de + pa;
     return (o.an ? '<span class="sf-s">🕶 Anônimo</span>' : '') + de + pa;
   }
-  function minDT() { var d = new Date(Math.ceil((Date.now() + 3600000) / 60000) * 60000), q = function (n) { return String(n).padStart(2, '0'); }; return d.getFullYear() + '-' + q(d.getMonth() + 1) + '-' + q(d.getDate()) + 'T' + q(d.getHours()) + ':' + q(d.getMinutes()); }
+  function minDT() { var parts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:'America/Santarem',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(Math.ceil((Date.now()+5400000)/300000)*300000)).map(function(p){return[p.type,p.value];}));return parts.year+'-'+parts.month+'-'+parts.day+'T'+parts.hour+':'+parts.minute; }
   function logo() { var i = document.querySelector('.brand img'); return i ? i.src : ''; }
   function fd(f) { var o = {}; new FormData(f).forEach(function (v, k) { o[k] = String(v).trim(); }); return o; }
   async function hs(p, salt) {
@@ -1911,7 +1921,7 @@ window.SF_API = async function (name, payload) {
     var ps = (window.SF && SF.listProducts && SF.listProducts()) || [], its = o.itens && o.itens.length ? o.itens : [{ n: o.i }];
     var p = ps.filter(function (x) { return (!o.lj||x.loja===o.lj)&&SF.plainName(x.name).toLowerCase() === String(its[0].n).toLowerCase(); })[0];
     var more = its.length > 1 ? '<span class="sf-more">+' + (its.length - 1) + ' item(ns)</span>' : '';
-    return '<div class="sf-pw">' + (p && p.image ? '<img class="sf-pic" alt="' + E(its[0].n) + '" src="' + E(p.image) + '">' : '<div class="sf-pic sf-nopic">📷 sem foto — confira o item</div>') + more + '</div>';
+    return '<div class="sf-pw" data-order-image data-product-name="'+E(its[0].n)+'" data-product-store="'+E(o.lj||'')+'">' + (p && p.image ? '<img class="sf-pic" alt="' + E(its[0].n) + '" src="' + E(p.image) + '">' : '<div class="sf-pic sf-nopic">📷 sem foto — confira o item</div>') + more + '</div>';
   }
   function ym(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); }
   var MS = ym(new Date());
@@ -2032,7 +2042,7 @@ var LJ = { sf: ['Santarém Flores', 'UklGRoYPAABXRUJQVlA4WAoAAAAQAAAARwAARwAAQUx
       DEF = minDT();
       var f = AO ? '<form class="sf-f" data-f="novo"><input name="c" placeholder="Cliente" required><input name="t" placeholder="Telefone / WhatsApp" required>' + itemSel() +
         '<input name="v" type="number" step="0.01" min="0" placeholder="Valor (R$)" required><select name="p"><option>Pix</option><option>Dinheiro</option><option>Cartão</option><option>A pagar</option></select><select name="e"><option>Entrega</option><option>Retirada</option></select>' +
-        '<input name="d" type="datetime-local" min="' + minDT() + '" value="' + minDT() + '" required class="sf-red" title="Mínimo 1 hora a partir de agora"><input name="rn" placeholder="Quem vai receber (nome)"><input name="rt" placeholder="Telefone de quem recebe">' +
+        '<input name="d" type="datetime-local" min="' + minDT() + '" value="' + minDT() + '" required class="sf-red" title="Mínimo 90 minutos a partir de agora"><input name="rn" placeholder="Quem vai receber (nome)"><input name="rt" placeholder="Telefone de quem recebe">' +
         '<input name="ru" placeholder="Rua"><input name="nu" placeholder="Número"><input name="ba" placeholder="Bairro"><label class="w"><input type="checkbox" name="an" value="1"> Anônimo (o entregador não vê o remetente)</label><input name="m" placeholder="Mensagem do cartão" class="w"><button class="sf-b w">Registrar pedido</button></form>' : '';
       var q = VQ.toLowerCase(), l = D.o.slice().reverse().filter(function (o) { return (!VF || String(o.s) === VF) && (!q || (o.id + o.c + o.t + o.i + (o.rn || '')).toLowerCase().indexOf(q) > -1); });
       var pages = Math.max(1, Math.ceil(l.length / 10)); if (VP > pages) VP = pages;
@@ -2248,7 +2258,7 @@ var LJ = { sf: ['Santarém Flores', 'UklGRoYPAABXRUJQVlA4WAoAAAAQAAAARwAARwAAQUx
     if (a === 'recx') { var pr = ((window.SF && SF.listProducts && SF.listProducts()) || [])[+el.dataset.pi]; await tk('sf_receita_salvar', { p_prod: SF.plainName(pr.name), p_ins: +el.dataset.ins, p_q: 0 }); await pull(); return render(); }
     if (a === 'tab') { T = el.dataset.v; SBO = false; return render(); }
     if (a === 'pgok' && o) { var mm = prompt('Forma de pagamento recebida (Pix, Dinheiro ou Cartão):', 'Pix'); if (!mm) return; await tk('sf_pg_equipe', { p_id: id, p_meio: mm }); await pull(); $('#sf-m').innerHTML = ''; return render(); }
-    if (a === 'dtset' && o) return modal('<h3 style="margin:0">⏰ Data e hora · ' + o.id + '</h3><p class="sf-note">Combinado com o cliente pelo WhatsApp.</p><form class="sf-f" data-f="dtset" style="grid-template-columns:1fr"><input type="hidden" name="id" value="' + o.id + '"><input name="d" type="datetime-local" min="' + minDT().slice(0, 11) + '00:00" required class="sf-red"><button class="sf-b">Salvar data e hora</button></form>');
+    if (a === 'dtset' && o) return modal('<h3 style="margin:0">⏰ Data e hora · ' + o.id + '</h3><p class="sf-note">Combinado com o cliente pelo WhatsApp.</p><form class="sf-f" data-f="dtset" style="grid-template-columns:1fr"><input type="hidden" name="id" value="' + o.id + '"><input name="d" type="datetime-local" min="' + minDT() + '" required class="sf-red"><button class="sf-b">Salvar data e hora</button></form>');
     if (a === 'dark') { DK = !DK; localStorage.setItem('sf_dark', DK ? '1' : '0'); root.classList.toggle('sf-dark', DK); return render(); }
     var fid = +el.dataset.fid, fx = FN.f.filter(function (z) { return z.id === fid; })[0], fi = FN.f[+i];
     if (a === 'nf') return modal(ffm()); if (a === 'ef' && fi) return modal(ffm(fi));
@@ -2316,7 +2326,7 @@ var LJ = { sf: ['Santarém Flores', 'UklGRoYPAABXRUJQVlA4WAoAAAAQAAAARwAARwAAQUx
       if (new Date(x.d) < new Date(Date.now() + 3540000)) return alert('A data e a hora devem ser de pelo menos 1 hora a partir de agora.');
       if (x.e === 'Entrega' && (!x.rn || !x.ru || !x.nu || !x.ba)) return alert('Informe quem vai receber e rua, número e bairro.');
       if (x.i === '__o') x.i = x.io; if (!x.i) return alert('Escolha ou digite o item do pedido.');
-      await tk('sf_criar_interno', { p: { loja: x.loja, c: x.c, t: x.t, i: x.i, v: +x.v, p: x.p, e: x.e, a: x.e === 'Entrega' ? x.ru + ', ' + x.nu + ' - ' + x.ba : '', ru: x.ru, nu: x.nu, ba: x.ba, d: x.d, dz: new Date(x.d).toISOString(), m: x.m, an: x.e === 'Entrega' && !!x.an, rn: x.rn, rt: x.rt } });
+      await tk('sf_criar_interno', { p: { loja: x.loja, c: x.c, t: x.t, i: x.i, v: +x.v, p: x.p, e: x.e, a: x.e === 'Entrega' ? x.ru + ', ' + x.nu + ' - ' + x.ba : '', ru: x.ru, nu: x.nu, ba: x.ba, d: x.d, dz: new Date(x.d+'-03:00').toISOString(), m: x.m, an: x.e === 'Entrega' && !!x.an, rn: x.rn, rt: x.rt } });
       AO = false; await pull(); return render();
     }
     if (k === 'rec') { var pp = ((window.SF && SF.listProducts && SF.listProducts()) || [])[+x.pi]; await tk('sf_receita_salvar', { p_prod: SF.plainName(pp.name), p_ins: +x.ins, p_q: +x.q }); await pull(); return render(); }
@@ -2325,7 +2335,7 @@ var LJ = { sf: ['Santarém Flores', 'UklGRoYPAABXRUJQVlA4WAoAAAAQAAAARwAARwAAQUx
     if (k === 'user') { await tk('sf_usuario_criar', { p_n: x.n, p_e: x.e, p_s: x.p, p_r: x.r }); await pull(); return render(); }
   }
 /* Experiência do painel: navegação, atualização, formulários e pedidos. */
-var UI={sync:'idle',last:0,pulling:null,busy:false,dirty:false,fingerprint:'',seen:null,searchTimer:0,modalFocus:null,filters:{brand:'',delivery:'',payment:'',when:'',sort:'recent'},catalogAt:0,partial:''};
+var UI={loaded:{},sync:'idle',last:0,pulling:null,busy:false,dirty:false,fingerprint:'',seen:null,searchTimer:0,modalFocus:null,filters:{brand:'',delivery:'',payment:'',when:'',sort:'recent'},catalogAt:0,partial:''};
 var ICONS={
  painel:'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',vendas:'M7 3h10l3 4v14H4V7l3-4 M4 7h16 M9 11a3 3 0 0 0 6 0',producao:'M12 9c-7-11-14 1-3 4-10 5-1 14 3 3 5 10 13 0 3-3 10-4 1-14-3-4 M12 9v7',entregas:'M3 6h11v11H3z M14 10h4l3 4v3h-7 M7 20a2 2 0 1 0 0-4 2 2 0 0 0 0 4 M18 20a2 2 0 1 0 0-4 2 2 0 0 0 0 4',estoque:'M3 7l9-4 9 4v10l-9 4-9-4V7 M3 7l9 4 9-4 M12 11v10 M7 5l10 4',financeiro:'M3 5h18v14H3z M3 9h18 M16 14h2 M7 14h3',folha:'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8 M2 21v-2a7 7 0 0 1 14 0v2 M17 4a4 4 0 0 1 0 7 M22 21v-2a6 6 0 0 0-4-6',despesas:'M8 3h8v18l-4-2-4 2V3 M10 8h4 M10 12h4',rastreio:'M10 17a7 7 0 1 0 0-14 7 7 0 0 0 0 14 M15 15l6 6',catalogo:'M4 3h16v18H4z M8 7h8 M8 11h8 M8 15h4',usuarios:'M5 10h14v11H5z M8 10V6a4 4 0 0 1 8 0v4 M12 14v3',menu:'M4 6h16 M4 12h16 M4 18h16',close:'M6 6l12 12 M18 6L6 18',refresh:'M20 7v5h-5 M4 17v-5h5 M6 7a7 7 0 0 1 12-2l2 2 M18 17a7 7 0 0 1-12 2l-2-2',arrow:'M5 12h14 M14 7l5 5-5 5',plus:'M12 5v14 M5 12h14',sun:'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M12 2v2 M12 20v2 M2 12h2 M20 12h2 M5 5l1 1 M18 18l1 1 M5 19l1-1 M18 6l1-1',moon:'M20 15A9 9 0 0 1 9 4a9 9 0 1 0 11 11',out:'M9 4H4v16h5 M10 12h11 M17 8l4 4-4 4',external:'M14 3h7v7 M21 3L10 14 M10 3H3v18h18v-7',clock:'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 7v5l3 2',check:'M5 12l4 4L19 6',download:'M12 3v12 M7 10l5 5 5-5 M4 16v5h16v-5',alert:'M12 3L2 21h20L12 3 M12 9v5 M12 17v1',filter:'M3 5h18 M6 12h12 M10 19h4',flower:'M12 2c3 5 6 6 10 6-4 3-5 6-4 10-4-1-7 0-10 4 0-4-1-7-6-10 5 0 9-3 10-10Z',eye:'M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12 M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6'};
 function ico(name){return '<svg class="sf-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="'+(ICONS[name]||ICONS.flower)+'"/></svg>';}
@@ -2335,7 +2345,7 @@ function dateLabel(s){if(!s)return 'A combinar';var d=new Date(s);return isNaN(d
 function empty(title,sub,action){return '<div class="sf-empty">'+ico('flower')+'<h3>'+E(title)+'</h3><p>'+E(sub||'')+'</p>'+(action||'')+'</div>';}
 function toast(text,type){var host=document.getElementById('sf-feedback');if(!host){host=document.createElement('div');host.id='sf-feedback';host.setAttribute('aria-live','polite');host.setAttribute('aria-atomic','true');document.body.appendChild(host);}host.className=type||'ok';host.textContent=text;clearTimeout(toast.timer);toast.timer=setTimeout(function(){host.textContent='';},5500);}
 function rpc(fn,a){return window.SF_API(fn,a);}
-function clearSession(){sessionStorage.removeItem('sf_tk');sessionStorage.removeItem('sf_me');TK='';me=null;D={o:[],s:[]};FN={f:[],p:[],d:[],r:[]};US=[];LD=[];UI.seen=null;UI.fingerprint='';}
+function clearSession(){sessionStorage.removeItem('sf_tk');sessionStorage.removeItem('sf_me');TK='';me=null;D={o:[],s:[]};FN={f:[],p:[],d:[],r:[]};US=[];LD=[];UI.seen=null;UI.fingerprint='';UI.loaded={};}
 function fail(error){if(/sessao_invalida/.test(error.message||'')){clearSession();UI.dirty=false;loginView();return toast('Sua sessão expirou. Entre novamente.','error');}var e=$('#sf-err');if(e)e.textContent=msg(error);else toast(msg(error),'error');}
 function syncText(){if(!navigator.onLine)return 'Sem conexão';if(UI.sync==='error')return 'Falha na atualização';if(UI.sync==='loading')return 'Atualizando…';if(UI.dirty)return 'Edição em andamento';if($('#sf-m .sf-md'))return $('#sf-m form')?'Preenchendo formulário':'Pedido aberto';if(UI.partial)return 'Atualização parcial';return UI.last?'Atualizado às '+hm(UI.last):'Conectando…';}
 function paintSync(){var e=$('#sf-sync');if(e){e.dataset.state=!navigator.onLine||UI.sync==='error'?'error':UI.sync==='loading'?'loading':'ok';e.querySelector('span').textContent=syncText();e.title=UI.partial||'Verificação automática a cada 15 segundos';}var b=$('[data-a="refresh"]');if(b)b.disabled=UI.sync==='loading'||UI.busy;}
@@ -2344,16 +2354,18 @@ async function pull(){
  var session=TK,role=me&&me.r;UI.sync='loading';paintSync();
  UI.pulling=(async function(){
   var jobs=[['orders',tk('sf_listar')]],op=['admin','vendas','producao'].indexOf(role)>-1;
-  if(op){jobs.push(['stock',tk('sf_est_listar')],['recipes',tk('sf_receitas_listar')]);}
-  if(['admin','vendas','producao'].indexOf(role)>-1)jobs.push(['leads',tk('sf_leads_listar')]);
-  if(role==='admin'||role==='vendas')jobs.push(['drivers',tk('sf_entregadores_listar')]);
-  if(role==='admin')jobs.push(['users',tk('sf_usuarios')],['finance',tk('sf_fin_tudo')]);
-  var results=await Promise.all(jobs.map(async function(job){try{return {name:job[0],data:await job[1]};}catch(error){return {name:job[0],error:error};}}));
+  if(op)jobs.push(['leads',tk('sf_leads_listar')]);
+  var wantStock=T==='estoque',wantFinance=role==='admin'&&['financeiro','folha','despesas'].indexOf(T)>-1,wantUsers=role==='admin'&&T==='usuarios';
+  if(wantStock)jobs.push(['stock',tk('sf_est_listar')],['recipes',tk('sf_receitas_listar')]);
+  if((role==='admin'||role==='vendas')&&(UI.busy||!UI.loaded.drivers||Date.now()-UI.loaded.drivers>300000))jobs.push(['drivers',tk('sf_entregadores_listar')]);
+  if(wantFinance)jobs.push(['finance',tk('sf_fin_tudo')]);
+  if(wantUsers)jobs.push(['users',tk('sf_usuarios')]);
+  var results=await Promise.all(jobs.map(async function(job){try{return{name:job[0],data:await job[1]};}catch(error){return{name:job[0],error:error};}}));
   if(session!==TK)return false;
   if(!UI.busy&&(UI.dirty||$('#sf-m .sf-md')||T==='catalogo')){UI.sync='ok';return false;}
-  var first=results[0];if(first.error)throw first.error;
+  if(results[0].error)throw results[0].error;
   results.forEach(function(r){if(r.error&&/sessao_invalida/.test(r.error.message||''))throw r.error;});
-  var next={},warnings=[];results.forEach(function(r){if(r.error)warnings.push(r.error.message);else next[r.name]=r.data;});
+  var next={},warnings=[];results.forEach(function(r){if(r.error)warnings.push(r.error.message);else{next[r.name]=r.data;UI.loaded[r.name]=Date.now();}});
   if(!Array.isArray(next.orders))throw new Error('A lista de pedidos retornou em formato inválido.');
   var fingerprint=JSON.stringify(next),changed=UI.fingerprint!==fingerprint;
   D.o=next.orders.map(function(o){return Object.assign({},o,{s:+o.s,h:Array.isArray(o.h)?o.h:[]});});
@@ -2361,11 +2373,18 @@ async function pull(){
   if(next.finance)FN=Object.assign({f:[],p:[],d:[],r:[]},next.finance);
   var ids=D.o.map(function(o){return o.id;});if(UI.seen){var count=ids.filter(function(id){return UI.seen.indexOf(id)<0;}).length;if(count)toast(count===1?'Novo pedido recebido.':count+' novos pedidos recebidos.');}UI.seen=ids;
   UI.fingerprint=fingerprint;UI.partial=warnings.length?'Alguns dados não foram atualizados. '+warnings[0]:'';UI.last=Date.now();UI.sync='ok';
-  if(Date.now()-UI.catalogAt>60000&&window.SF&&SF.loadProducts){try{await SF.loadProducts(role);UI.catalogAt=Date.now();}catch(error){UI.partial=UI.partial||'Não foi possível atualizar as imagens do catálogo.';}}
+  // A tela já pode abrir enquanto os nomes e preços chegam em segundo plano.
+  if(Date.now()-UI.catalogAt>60000&&window.SF&&SF.loadProducts){UI.catalogAt=Date.now();SF.loadProducts(role).catch(function(){UI.catalogAt=0;});}
   return changed;
  })().catch(function(error){UI.sync='error';throw error;}).finally(function(){UI.pulling=null;paintSync();});return UI.pulling;
 }
-async function refreshNow(){if(UI.dirty||$('#sf-m .sf-md'))return toast('Finalize ou feche a edição para atualizar.');if(UI.busy)return;UI.catalogAt=0;await pull();if(T!=='catalogo')render();toast(UI.partial||'Dados atualizados.',UI.partial?'error':'ok');}
+async function ensureViewData(view){
+ var needed=view==='estoque'?!UI.loaded.stock:['financeiro','folha','despesas'].indexOf(view)>-1?!UI.loaded.finance:view==='usuarios'?!UI.loaded.users:false;
+ if(!needed)return;
+ await pull();if(T===view&&!UI.dirty&&!$('#sf-m .sf-md'))render();
+}
+
+async function refreshNow(){if(UI.dirty||$('#sf-m .sf-md'))return toast('Finalize ou feche a edição para atualizar.');if(UI.busy)return;UI.catalogAt=0;if(SF.retryImages)SF.retryImages();await pull();if(T!=='catalogo')render();toast(UI.partial||'Dados atualizados.',UI.partial?'error':'ok');}
 async function autoSync(){if(!me||document.hidden||UI.busy||UI.dirty||$('#sf-m .sf-md')||T==='catalogo'){paintSync();return;}try{var changed=await pull();if(changed&&!UI.dirty&&!$('#sf-m .sf-md')&&T!=='catalogo')render();}catch(error){if(/sessao_invalida/.test(error.message||''))fail(error);}paintSync();}
 function canLeave(){return !UI.dirty||confirm('Há alterações não salvas. Deseja descartá-las?');}
 function sidebar(tabs){return '<div class="sf-side-brand"><div class="sf-brand-pair"><img src="'+storeLogo({lj:'sdf'})+'" alt="Santarém das Flores"><img src="'+storeLogo({lj:'sf'})+'" alt="Santarém Flores"></div><div><b>Santarém</b><small>DUAS LOJAS · UMA EQUIPE</small></div></div><div class="sf-side-label">ÁREA DE TRABALHO</div>'+SG.map(function(g){var list=g[1].filter(function(k){return tabs.indexOf(k)>-1;});return list.length?'<div class="sf-sg">'+g[0]+'</div>'+list.map(function(k){var n=k==='vendas'?D.o.filter(function(o){return o.s<4;}).length:k==='producao'?D.o.filter(function(o){return o.s<2&&paid(o);}).length:k==='entregas'?D.o.filter(function(o){return o.s===2||o.s===3;}).length:0;return '<button class="'+(k===T?'on':'')+'" data-a="tab" data-v="'+k+'" title="'+TABS[k][0]+'"'+(k===T?' aria-current="page"':'')+'>'+ico(k)+'<span>'+TABS[k][0]+'</span>'+(n?'<em>'+n+'</em>':'')+'</button>';}).join(''):'';}).join('')+'<div class="sf-side-footer">'+ico('flower')+'<span>Mais que flores,<br>sentimentos.</span></div>';}
@@ -2374,7 +2393,7 @@ function captureFocus(){var el=document.activeElement;if(!el||!root.contains(el)
 function render(){
  var focus=captureFocus();unmountCat();var tabs=allowed();if(tabs.indexOf(T)<0)T=tabs[0];
  root.innerHTML='<header class="sf-h"><button class="sf-icon-button sf-hb" data-a="sbt" aria-label="Abrir ou recolher menu" aria-expanded="'+(matchMedia('(max-width:900px)').matches?SBO:!SBC)+'" aria-controls="sf-sidebar">'+ico('menu')+'</button><div class="sf-header-title">Gestão da floricultura</div><div id="sf-sync" data-state="ok" role="status"><i></i><span>'+E(syncText())+'</span></div><button class="sf-icon-button" data-a="refresh" aria-label="Atualizar dados" title="Atualizar dados">'+ico('refresh')+'</button>'+storeLinks()+'<button class="sf-icon-button sf-dk" data-a="dark" aria-label="'+(DK?'Ativar tema claro':'Ativar tema escuro')+'">'+ico(DK?'sun':'moon')+'</button><div class="sf-user"><b>'+E(String(me.n||'Equipe').split(' ').map(function(p){return p[0];}).slice(0,2).join(''))+'</b><div>'+E(me.n)+'<small>'+E(ROLES[me.r])+'</small></div></div><button class="sf-icon-button" data-a="out" aria-label="Sair da conta" title="Sair da conta">'+ico('out')+'</button></header><div class="sf-shell'+(SBC?' col':'')+(SBO?' open':'')+'"><aside class="sf-sb" id="sf-sidebar" aria-label="Menu do painel">'+sidebar(tabs)+'</aside><button class="sf-sbx" data-a="sbx" aria-label="Fechar menu"></button><main class="sf-c" id="panel-main">'+head(T)+V[T]()+'<footer class="sf-page-footer"><span>Santarém das Flores + Santarém Flores · Gestão</span><span>'+E(new Date().toLocaleDateString('pt-BR',{day:'2-digit',month:'long',year:'numeric'}))+'</span></footer></main></div><div id="sf-m"></div>';
- if(T==='catalogo')mountCat();enhanceUI();paintSync();
+ if(T==='catalogo')mountCat();enhanceUI();paintSync();if(window.SF?.hydrateImages)SF.hydrateImages(root);
  if(focus){var el=focus.id?document.getElementById(focus.id):focus.action?root.querySelector('[data-a="'+focus.action+'"]'+(focus.key?'[data-key="'+focus.key+'"]':'')+(focus.k?'[data-k="'+focus.k+'"]':'')):null;if(el){el.focus({preventScroll:true});if(focus.start!=null&&el.setSelectionRange){try{el.setSelectionRange(focus.start,focus.end);}catch(_){}}}}
 }
 function kc(old,title,value,tab,tone){var key={'Pedidos em andamento':'vendas','Vendas hoje':'financeiro','Vendas do mês':'financeiro','Pagamento pendente':'clock','Pedidos atrasados':'alert','Estoque baixo':'estoque','Vendas':'financeiro','Pedidos':'vendas','Ticket médio':'financeiro','Despesas':'despesas','Folha de pagamento':'folha','Resultado':'painel'}[title]||'painel';var tag=tab?'button':'div';return '<'+tag+' class="kc '+(tone||'')+'"'+(tab?' data-a="tab" data-v="'+tab+'"':'')+'><span class="ki">'+ico(key)+'</span><div><small>'+E(title)+'</small><b>'+value+'</b></div>'+(tab?'<span class="kc-arrow">'+ico('arrow')+'</span>':'')+'</'+tag+'>';}
@@ -2395,9 +2414,9 @@ V.vendas=function(){var list=filteredOrders(),pages=Math.max(1,Math.ceil(list.le
 };
 function tbl(list){if(!list.length)return empty('Nenhum pedido por aqui','Novos pedidos da loja aparecerão automaticamente.');return '<div class="sf-t o"><table><thead><tr><th>Pedido / cliente</th><th>Produto</th><th>Recebimento</th><th>Valor total</th><th>Etapa</th><th></th></tr></thead><tbody>'+list.map(function(o){return '<tr><td data-l="Pedido"><div class="sf-order-person"><span class="sf-order-initial">'+E(String(o.c||'?').slice(0,1).toUpperCase())+'</span><span><b>'+E(o.c)+'</b><small>'+E(o.id)+' · '+E(o.t)+'</small>'+lj(o)+'</span></div></td><td data-l="Produto"><b class="sf-product-line">'+E(o.i)+'</b><small class="sf-table-muted">'+dateLabel(o.t0)+'</small></td><td data-l="Recebimento"><span class="sf-delivery-type">'+ico(o.e==='Entrega'?'entregas':'vendas')+E(o.e)+'</span><small class="sf-table-muted">'+E(dateLabel(o.d))+'</small></td><td data-l="Total"><b>'+R(tot(o))+'</b><small class="sf-table-muted">'+E(o.p)+'</small></td><td data-l="Etapa">'+badge(o.s,o)+pgb(o)+'</td><td><button class="sf-detail-button" data-a="det" data-id="'+E(o.id)+'">Ver pedido '+ico('arrow')+'</button></td></tr>';}).join('')+'</tbody></table></div>';}
 function exportOrders(){var rows=[['Pedido','Loja de origem','Cliente','Telefone','Produto','Total','Recebimento','Previsão','Etapa','Pagamento']].concat(filteredOrders().map(function(o){return [o.id,storeName(o),o.c,o.t,o.i,tot(o).toFixed(2).replace('.',','),o.e,dateLabel(o.d),ST[o.s],o.p];}));var safe=function(v){var s=String(v==null?'':v);if(/^[\s]*[=+\-@]/.test(s))s="'"+s;return '"'+s.replace(/"/g,'""')+'"';};var blob=new Blob(['\uFEFF'+rows.map(function(r){return r.map(safe).join(';');}).join('\r\n')],{type:'text/csv;charset=utf-8;'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='pedidos-'+new Date().toISOString().slice(0,10)+'.csv';link.click();setTimeout(function(){URL.revokeObjectURL(url);},1000);toast('Exportação dos pedidos filtrados concluída.');}
-function showModal(html){UI.modalFocus=document.activeElement;$('#sf-m').innerHTML='<div class="sf-mo" data-a="mx"><section class="sf-md" role="dialog" aria-modal="true" aria-label="Detalhes e edição do pedido"><button class="sf-mx" data-a="mc" aria-label="Fechar janela">'+ico('close')+'</button>'+html+'</section></div>';enhanceUI();var target=$('#sf-m input:not([type="hidden"]),#sf-m button');if(target)target.focus();paintSync();}
+function showModal(html){UI.modalFocus=document.activeElement;$('#sf-m').innerHTML='<div class="sf-mo" data-a="mx"><section class="sf-md" role="dialog" aria-modal="true" aria-label="Detalhes e edição do pedido"><button class="sf-mx" data-a="mc" aria-label="Fechar janela">'+ico('close')+'</button>'+html+'</section></div>';enhanceUI();if(window.SF?.hydrateImages)SF.hydrateImages(root);var target=$('#sf-m input:not([type="hidden"]),#sf-m button');if(target)target.focus();paintSync();}
 function modal(html){showModal(html+'<button class="sf-l" data-a="mc">Cancelar</button>');}
-function openNewOrder(){if(['admin','vendas'].indexOf(me.r)<0)return;DEF=minDT();showModal('<div class="sf-modal-heading"><span>'+ico('plus')+'</span><p class="sf-eyebrow">ATENDIMENTO</p><h2>Novo pedido</h2><p>Registre uma venda feita pela equipe.</p></div><form class="sf-f" data-f="novo"><label class="sf-field w"><span>Loja responsável pelo pedido</span><select name="loja" required><option value="">Selecione a loja</option><option value="sdf">Santarém das Flores</option><option value="sf">Santarém Flores</option></select></label><input name="c" placeholder="Nome do cliente" required maxlength="100"><input name="t" type="tel" placeholder="Telefone / WhatsApp" required>'+itemSel()+'<input name="v" type="number" step="0.01" min="0" placeholder="Valor dos produtos (R$)" required><select name="p" aria-label="Forma de pagamento"><option>Pix</option><option>Dinheiro</option><option>Cartão</option><option>A pagar</option></select><select name="e" aria-label="Recebimento"><option>Entrega</option><option>Retirada</option></select><input name="d" type="datetime-local" min="'+DEF+'" value="'+DEF+'" required aria-label="Data e hora combinadas"><input name="rn" placeholder="Quem vai receber" data-delivery required><input name="rt" type="tel" placeholder="Telefone de quem recebe" data-delivery><input name="ru" placeholder="Rua ou avenida" data-delivery required><input name="nu" placeholder="Número" data-delivery required><input name="ba" placeholder="Bairro" data-delivery required><label class="w sf-checkbox" data-delivery><input type="checkbox" name="an" value="1"> Envio anônimo</label><input name="m" placeholder="Mensagem do cartão (opcional)" class="w" maxlength="180"><div class="sf-form-help w">'+ico('clock')+'Agende com pelo menos 1 hora de antecedência. Em entregas, o total considera a taxa de R$ 20,00.</div><button class="sf-b w">Registrar pedido '+ico('check')+'</button></form>');}
+function openNewOrder(){if(['admin','vendas'].indexOf(me.r)<0)return;DEF=minDT();showModal('<div class="sf-modal-heading"><span>'+ico('plus')+'</span><p class="sf-eyebrow">ATENDIMENTO</p><h2>Novo pedido</h2><p>Registre uma venda feita pela equipe.</p></div><form class="sf-f" data-f="novo"><label class="sf-field w"><span>Loja responsável pelo pedido</span><select name="loja" required><option value="">Selecione a loja</option><option value="sdf">Santarém das Flores</option><option value="sf">Santarém Flores</option></select></label><input name="c" placeholder="Nome do cliente" required maxlength="100"><input name="t" type="tel" placeholder="Telefone / WhatsApp" required>'+itemSel()+'<input name="v" type="number" step="0.01" min="0" placeholder="Valor dos produtos (R$)" required><select name="p" aria-label="Forma de pagamento"><option>Pix</option><option>Dinheiro</option><option>Cartão</option><option>A pagar</option></select><select name="e" aria-label="Recebimento"><option>Entrega</option><option>Retirada</option></select><input name="d" type="datetime-local" min="'+DEF+'" value="'+DEF+'" required aria-label="Data e hora combinadas"><input name="rn" placeholder="Quem vai receber" data-delivery required><input name="rt" type="tel" placeholder="Telefone de quem recebe" data-delivery><input name="ru" placeholder="Rua ou avenida" data-delivery required><input name="nu" placeholder="Número" data-delivery required><input name="ba" placeholder="Bairro" data-delivery required><label class="w sf-checkbox" data-delivery><input type="checkbox" name="an" value="1"> Envio anônimo</label><input name="m" placeholder="Mensagem do cartão (opcional)" class="w" maxlength="180"><div class="sf-form-help w">'+ico('clock')+'Agende com pelo menos 90 minutos de antecedência. Em entregas, o total considera a taxa de R$ 20,00.</div><button class="sf-b w">Registrar pedido '+ico('check')+'</button></form>');}
 function detUi(id){var o=O(id);if(!o)return;var total=tot(o);showModal('<div class="sf-modal-heading">'+lj(o)+'<p class="sf-eyebrow">PEDIDO '+E(o.id)+'</p><h2>'+E(ent()&&o.an?o.rn:o.c)+'</h2><p>'+E(ent()&&o.an?o.rt:o.t)+'</p>'+badge(o.s,o)+pgb(o)+'</div><div class="sf-detail-product">'+pic(o)+'<div><h3>'+E(o.i)+'</h3><b>'+R(total)+'</b><p>Produtos: '+R(o.v)+(fee(o)?' · Entrega: '+R(fee(o)):'')+'</p></div></div><div class="sf-detail-info"><div><small>Recebimento</small><b>'+E(o.e)+'</b><p>'+E(o.a||'Retirada na loja')+'</p></div><div><small>Previsão</small><b>'+E(dateLabel(o.d))+'</b>'+(!o.d&&o.s<4&&!ent()?'<button class="sf-text-button" data-a="dtset" data-id="'+E(o.id)+'">Definir data e hora</button>':'')+'</div><div><small>Pagamento</small><b>'+E(o.p)+'</b></div><div><small>Quem recebe</small><b>'+E(o.rn||o.c)+'</b><p>'+E(o.rt||o.t)+'</p></div></div>'+(o.m&&!(ent()&&o.an)?'<div class="sf-card-message"><small>Mensagem do cartão</small><p>'+E(o.m)+'</p></div>':'')+(o.sp?'<p class="sf-note">Observação: '+E(o.sp)+'</p>':'')+'<h3 class="sf-timeline-title">Histórico do pedido</h3>'+tl(o)+'<div class="sf-detail-actions">'+(o.s<4?'<button class="sf-b" data-a="adv" data-id="'+E(o.id)+'">'+nextLabel(o)+' '+ico('arrow')+'</button>':'')+(!ent()&&!paid(o)&&o.s!==5?'<button class="sf-b y" data-a="pgok" data-id="'+E(o.id)+'">Confirmar pagamento</button>':'')+(!ent()?'<a class="sf-l" href="'+wa(o)+'" target="_blank" rel="noopener">Enviar status no WhatsApp</a>':'')+(o.e==='Entrega'?'<button class="sf-l" data-a="rota" data-id="'+E(o.id)+'">Abrir rota '+ico('external')+'</button>':'')+'<button class="sf-l" data-a="img" data-id="'+E(o.id)+'">Imagem do pedido</button>'+(o.s<4?'<button class="sf-text-button sf-danger" data-a="can" data-id="'+E(o.id)+'">Cancelar pedido</button>':'')+(me.r==='admin'?'<button class="sf-text-button sf-danger" data-a="del" data-id="'+E(o.id)+'">Apagar pedido</button>':'')+'</div>');}
 async function loginView(){unmountCat();var first=false,connectionError='';try{first=!(await rpc('sf_tem_equipe'));}catch(error){connectionError='Não foi possível conectar ao servidor. Confira a internet e tente novamente.';}
  root.innerHTML='<div class="sf-login-screen"><section class="sf-login-art"><div class="sf-login-brands"><img src="'+storeLogo({lj:'sdf'})+'" alt="Santarém das Flores"><img src="'+storeLogo({lj:'sf'})+'" alt="Santarém Flores"></div><p class="sf-eyebrow">SANTARÉM DAS FLORES + SANTARÉM FLORES</p><h1>Cuidado em<br>cada detalhe.</h1><p>Da primeira escolha à última entrega.<br>Sua equipe, conectada.</p><span>MAIS QUE FLORES, SENTIMENTOS.</span></section><section class="sf-login"><p class="sf-eyebrow">ÁREA DA EQUIPE</p><h2>'+(first?'Vamos começar?':'Boas-vindas de volta.')+'</h2><p>'+(first?'Crie a primeira conta administradora.':'Entre para acompanhar sua operação.')+'</p><form data-f="'+(first?'setup':'login')+'">'+(first?'<label><span>Seu nome</span><input name="n" required autocomplete="name"></label>':'')+'<label><span>Usuário</span><input name="e" required autocomplete="username" autocapitalize="none" autocorrect="off" placeholder="Seu usuário"></label><label><span>Senha</span><div class="sf-password"><input name="p" type="password" required autocomplete="'+(first?'new-password':'current-password')+'"'+(first?' minlength="6"':'')+' placeholder="Sua senha"><button type="button" data-a="password" aria-label="Mostrar senha">'+ico('eye')+'</button></div></label><p id="sf-err" role="alert">'+E(connectionError)+'</p><button class="sf-b"'+(connectionError?' disabled':'')+'>'+(first?'Criar conta e entrar':'Entrar no painel')+' '+ico('arrow')+'</button></form>'+(connectionError?'<button class="sf-l" data-a="retrylogin">Tentar conexão novamente</button>':'')+'<a href="santarem-das-flores.html" class="sf-login-back">← Voltar à loja</a><small class="sf-login-note">Use o acesso fornecido pelo administrador.</small></section></div>';
@@ -2423,13 +2442,13 @@ async function hcUi(ev){var el=ev.target.closest('[data-a]');if(!el)return;var a
  if(a==='stage'){T='vendas';if(allowed().indexOf(T)<0)return;VF=el.dataset.s;VP=1;UI.dirty=false;SBO=false;return render();}
  if(a==='clearfilters'){VQ='';VF='';VP=1;UI.filters={brand:'',delivery:'',payment:'',when:'',sort:'recent'};return render();}
  if(a==='export')return exportOrders();
- if(a==='addp'){UI.dirty=false;return openNewOrder();}
+ if(a==='addp'){UI.dirty=false;await SF.loadProducts(me.r);return openNewOrder();}
  if(a==='tab'){if(allowed().indexOf(el.dataset.v)<0)return;UI.dirty=false;}
  if(a==='det'){if(UI.dirty&&!canLeave())return;UI.dirty=false;return det(el.dataset.id);}
  if(a==='dtset'&&UI.dirty){if(!canLeave())return;UI.dirty=false;}
  if(a==='out'){if(UI.busy)return;UI.busy=true;try{await tk('sf_sair');}catch(_){}clearSession();UI.dirty=false;UI.busy=false;return loginView();}
  var local=['tab','vp','tv','tvx','cat','close','rota','img','cp','dtset','nf','ef','lanc'];
- if(local.indexOf(a)>-1){var answer=await hcBase(ev);enhanceUI();return answer;}
+ if(local.indexOf(a)>-1){var answer=await hcBase(ev);enhanceUI();if(a==='tab')await ensureViewData(T);return answer;}
  if(UI.busy)return;UI.busy=true;el.disabled=true;var wasDirty=UI.dirty;UI.dirty=false;
  try{return await hcBase(ev);}catch(error){UI.dirty=wasDirty;throw error;}finally{UI.busy=false;if(el.isConnected)el.disabled=false;enhanceUI();paintSync();}
 }
@@ -2449,6 +2468,8 @@ async function hs2Ui(ev){var form=ev.target;if(!form.dataset.f)return;ev.prevent
 }
 function cp(text){if(navigator.clipboard)return navigator.clipboard.writeText(text).then(function(){toast('Link copiado.');},function(){toast('Não foi possível copiar.','error');});prompt('Copie o link:',text);}
 window.SF_PANEL={canLeave:canLeave,setDirty:function(value){UI.dirty=!!value;paintSync();}};
+['estoque','financeiro','folha','despesas','usuarios'].forEach(function(view){var original=V[view];V[view]=function(){var key=view==='estoque'?'stock':view==='usuarios'?'users':'finance';if(!UI.loaded[key])return empty(UI.partial?'Não foi possível carregar esta seção':'Carregando informações…',UI.partial||'Só buscamos os dados desta área quando você abre a seção.',UI.partial?'<button class="sf-b" data-a="refresh">Tentar novamente</button>':'');return original();};});
+document.addEventListener('sf:catalog-ready',function(){if(root&&T==='estoque'&&UI.loaded.stock&&!UI.busy&&!UI.dirty&&!$('#sf-m .sf-md'))render();});
 function init(){
  root=document.createElement('div');root.id='sf-app';root.hidden=true;root.classList.toggle('sf-dark',DK);document.body.appendChild(root);var loading=document.getElementById('panel-loading');if(loading)loading.remove();
  document.addEventListener('click',function(ev){hc(ev).catch(fail);});
@@ -2474,7 +2495,7 @@ function tl(o){var steps=[0,1,2].concat(o.e==='Entrega'?[3]:[]).concat([4]);if(o
 function nextLabel(o){return o.s===0?'Iniciar produção':o.s===1?'Marcar como pronto':o.s===2?(o.e==='Entrega'?'Iniciar entrega':'Confirmar retirada'):o.s===3?'Confirmar entrega':'';}
 function canAdvance(o){if(!me||o.s>=4)return false;if(me.r==='entrega')return o.e==='Entrega'&&(o.s===2||o.s===3)&&(!o.en||o.en===me.n);if(me.r==='producao')return o.s===0||o.s===1;return commercial();}
 function advanceButton(o){if(!canAdvance(o))return '';return '<button class="sf-b" data-a="adv" data-id="'+E(o.id)+'"'+((o.s===0||o.s===2&&o.e==='Entrega')&&!paid(o)?' disabled title="A equipe precisa confirmar o pagamento ou autorizar a cobrança no recebimento"':'')+'>'+nextLabel(o)+' '+ico('arrow')+'</button>';}
-function statusError(error){var messages={cadastro_incompleto:'Complete o endereço e o nome de quem recebe antes de continuar.',contato_encerrado:'Este contato foi descartado. Revise o atendimento antes de criar outro pedido.',contato_ja_convertido:'Este contato já virou um pedido. Use o pedido para acompanhar ou cancelar.',pedido_ja_recebido:'Este pedido já está no painel. Combine alterações com a equipe para evitar duplicidade.',pedido_cancelado:'Este pedido foi cancelado. Fale com a equipe para fazer um novo pedido.',pedido_encerrado:'Este pedido já foi concluído ou cancelado e não pode voltar de etapa.',transicao_invalida:'A etapa do pedido mudou. Atualize a lista e siga a próxima ação disponível.',recebimento_pendente:'Confirme o recebimento do valor antes de concluir a entrega ou retirada.',entregador_pendente:'Selecione um entregador para iniciar a rota.',entregador_invalido:'Escolha um entregador ativo da equipe.',estoque_insuficiente:'Não há insumos suficientes. Confira o estoque antes de iniciar a produção.',pagamento_pendente:'Confirme o pagamento ou autorize a cobrança na entrega/retirada para liberar a produção.'};return messages[error.message]||msgUi(error);}
+function statusError(error){var messages={antecedencia:'Escolha uma data e hora com pelo menos 90 minutos de antecedência.',agendamento_obrigatorio:'Informe a data e a hora da entrega ou retirada.',cadastro_incompleto:'Complete o endereço e o nome de quem recebe antes de continuar.',contato_encerrado:'Este contato foi descartado. Revise o atendimento antes de criar outro pedido.',contato_ja_convertido:'Este contato já virou um pedido. Use o pedido para acompanhar ou cancelar.',pedido_ja_recebido:'Este pedido já está no painel. Combine alterações com a equipe para evitar duplicidade.',pedido_cancelado:'Este pedido foi cancelado. Fale com a equipe para fazer um novo pedido.',pedido_encerrado:'Este pedido já foi concluído ou cancelado e não pode voltar de etapa.',transicao_invalida:'A etapa do pedido mudou. Atualize a lista e siga a próxima ação disponível.',recebimento_pendente:'Confirme o recebimento do valor antes de concluir a entrega ou retirada.',entregador_pendente:'Selecione um entregador para iniciar a rota.',entregador_invalido:'Escolha um entregador ativo da equipe.',estoque_insuficiente:'Não há insumos suficientes. Confira o estoque antes de iniciar a produção.',pagamento_pendente:'Confirme o pagamento ou autorize a cobrança na entrega/retirada para liberar a produção.'};return messages[error.message]||msgUi(error);}
 function msg(error){return statusError(error);}
 function leadQueue(){var leads=visibleLeads();if(!leads.length)return empty('Nenhum pré-pedido aguardando atendimento','Os contatos enviados pelo site aparecerão aqui até virarem pedidos.');return '<div class="sf-g sf-flow-leads">'+leads.map(function(l){return '<article class="sf-card sf-flow-lead" data-lead-id="'+l.id+'"><div class="sf-row"><b>Pré-pedido #'+l.id+'</b><span class="sf-s s0">Aguardando entrada</span></div>'+lj(l)+'<h3>'+E(l.c)+'</h3><p>'+E(l.i)+'</p>'+(commercial()?'<small>'+E(l.t)+' · '+R(l.v)+'</small>':'')+(l.status==='atendido'?'<p class="sf-flow-note">Atendimento anterior sem pedido vinculado. Pode ser recuperado.</p>':'')+'<div class="sf-row">'+(commercial()?'<button class="sf-b" data-a="ldst" data-lid="'+l.id+'" data-st="atendido">Atendido · enviar à fila '+ico('arrow')+'</button><button class="sf-text-button sf-danger" data-a="ldst" data-lid="'+l.id+'" data-st="descartado">Descartar contato</button>':'<small>Aguardando confirmação do atendimento pela equipe de Vendas.</small>')+'</div></article>';}).join('')+'</div>';}
 pendBox=function(){var leads=visibleLeads(),unpaid=D.o.filter(function(o){return storeMatch(o)&&!paid(o)&&o.s<4;}),n=unpaid.length+leads.length;if(!n)return '';return '<details class="sf-pending"'+(leads.length?' open':'')+'><summary>'+ico('clock')+'<span>Pré-pedidos e liberações pendentes</span><b>'+n+'</b><small>Ver detalhes</small></summary><div class="sf-pending-body">'+(leads.length?'<h3>Aguardando entrada na produção</h3><p class="sf-note">Atendido transforma o contato em pedido. A produção começa após a liberação do pagamento.</p>'+leadQueue():'')+(unpaid.length?'<h3>Pedidos aguardando liberação</h3><div class="sf-g">'+unpaid.map(function(o){return '<article class="sf-card">'+lj(o)+'<b>'+E(o.id)+' · '+E(o.c)+'</b><p>'+E(o.i)+'</p>'+pgb(o)+'<div class="sf-row">'+(commercial()?'<button class="sf-b" data-a="pgok" data-id="'+E(o.id)+'">Definir pagamento</button>':'')+'<button class="sf-l" data-a="det" data-id="'+E(o.id)+'">Ver pedido</button></div></article>';}).join('')+'</div>':'')+'</div></details>';};
