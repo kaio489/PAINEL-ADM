@@ -1226,7 +1226,7 @@ window.SF_CONFIG = { DEMO_ADMIN: null,
   var DB = window.SF_DB;
   var ST = ['Recebido', 'Em produção', 'Pronto', 'Saiu para entrega', 'Entregue', 'Cancelado'];
   var ROLES = { admin: 'Administrador', vendas: 'Vendas', producao: 'Produção', entrega: 'Entregador' };
-  var TABS = { painel: ['Painel', 'admin'], vendas: ['Vendas', 'admin,vendas'], producao: ['Produção', 'admin,producao,vendas'], entregas: ['Entregas', 'admin,vendas,entrega'], estoque: ['Estoque', 'admin,producao,vendas'], financeiro: ['Financeiro', 'admin'], folha: ['Folha de pagamento', 'admin'], despesas: ['Despesas', 'admin'], rastreio: ['Rastreio', 'admin'], catalogo: ['Catálogo', 'admin,vendas'], usuarios: ['Usuários e senhas', 'admin'] };
+  var TABS = { painel: ['Painel', 'admin'], vendas: ['Vendas', 'admin,vendas'], producao: ['Produção', 'admin,producao,vendas'], entregas: ['Entregas', 'admin,vendas,entrega'], estoque: ['Estoque', 'admin,producao,vendas'], financeiro: ['Financeiro', 'admin'], folha: ['Folha de pagamento', 'admin'], despesas: ['Despesas', 'admin'], rastreio: ['Rastreio', 'admin,vendas'], catalogo: ['Catálogo', 'admin,vendas'], usuarios: ['Usuários e senhas', 'admin'] };
   var $ = function (s) { return document.querySelector(s); };
   var E = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
   var R = function (n) { return 'R$ ' + (+n || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
